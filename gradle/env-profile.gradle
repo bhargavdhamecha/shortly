@@ -1,0 +1,75 @@
+def repositoryRoot = projectDir.parentFile
+def envExample = new File(repositoryRoot, '.env.example')
+def envDev = new File(repositoryRoot, '.env.dev')
+def envProd = new File(repositoryRoot, '.env.prod')
+
+def copyEnvDev = tasks.register('copyEnvDev') {
+	group = 'application'
+	description = 'Create the local .env.dev file from .env.example if it does not exist.'
+	inputs.file(envExample)
+	outputs.file(envDev)
+	onlyIf { !envDev.exists() }
+	doLast {
+		if (!envExample.isFile()) {
+			throw new GradleException("Missing env template: ${envExample}")
+		}
+		java.nio.file.Files.copy(envExample.toPath(), envDev.toPath())
+		logger.lifecycle("Created ${envDev}; edit it with local development values.")
+	}
+}
+
+def parseEnvFile = { File envFile ->
+	if (!envFile.isFile()) {
+		throw new GradleException("Missing ${envFile.name}. Create it by copying .env.example and setting its values.")
+	}
+	def result = [:]
+	envFile.eachLine('UTF-8') { rawLine ->
+		def line = rawLine.trim()
+		if (line && !line.startsWith('#')) {
+			int separator = line.indexOf('=')
+			if (separator <= 0) {
+				throw new GradleException("Invalid env-file entry in ${envFile.name}; expected KEY=value.")
+			}
+			def key = line.substring(0, separator).trim()
+			if (!(key ==~ /[A-Za-z_][A-Za-z0-9_]*/)) {
+				throw new GradleException("Invalid variable name in ${envFile.name}.")
+			}
+			result[key] = line.substring(separator + 1).trim()
+		}
+	}
+	result
+}
+
+def bootRunDev = tasks.register('bootRunDev') {
+	group = 'application'
+	description = 'Run the application with .env.dev and the local Spring profile.'
+	dependsOn(copyEnvDev)
+	dependsOn(tasks.named('bootRun'))
+}
+
+def bootRunProd = tasks.register('bootRunProd') {
+	group = 'application'
+	description = 'Run the application with .env.prod and the prod Spring profile.'
+	dependsOn(tasks.named('bootRun'))
+}
+
+def requestedDev = gradle.startParameter.taskNames.any { it.endsWith('bootRunDev') }
+def requestedProd = gradle.startParameter.taskNames.any { it.endsWith('bootRunProd') }
+if (requestedDev && requestedProd) {
+	throw new GradleException('Choose either bootRunDev or bootRunProd for one Gradle invocation.')
+}
+
+if (requestedDev || requestedProd) {
+	def selectedProfile = requestedDev ? 'local' : 'prod'
+	def selectedEnvFile = requestedDev ? envDev : envProd
+	def runTask = tasks.named('bootRun')
+	if (requestedDev) {
+		runTask.configure { dependsOn(copyEnvDev) }
+	}
+	runTask.configure {
+		doFirst {
+			environment(parseEnvFile(selectedEnvFile))
+			environment('SPRING_PROFILES_ACTIVE', selectedProfile)
+		}
+	}
+}
